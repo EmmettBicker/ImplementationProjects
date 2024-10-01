@@ -34,33 +34,36 @@ class SimpleModel(nn.Module):
     def forward(self, x):
         return self.fc(x)
 
-def run_distributed(rank, world_size, fn, *args):
-    setup(rank, world_size)
-    fn(rank, world_size, *args)
-    cleanup()
+class DistributedRunner:
+    def __init__(self, fn, num_virtual_gpus=None):
+        self.fn = fn
+        self.num_virtual_gpus = num_virtual_gpus
 
-def distribute(fn):
-    @wraps(fn)
-    def wrapper(*args, **kwargs):
-        num_virtual_gpus = kwargs.pop('num_virtual_gpus', None)
-        
-        def run():
-            if num_virtual_gpus is not None:
-                with VirtualGPU(num_virtual_gpus):
-                    world_size = torch.cuda.device_count()
-                    mp.spawn(run_distributed, args=(world_size, fn) + args, nprocs=world_size, join=True)
-            else:
+    def run_distributed(self, rank, world_size, *args):
+        setup(rank, world_size)
+        self.fn(rank, world_size, *args)
+        cleanup()
+
+    def __call__(self, *args, **kwargs):
+        if self.num_virtual_gpus is not None:
+            with VirtualGPU(self.num_virtual_gpus):
                 world_size = torch.cuda.device_count()
-                mp.spawn(run_distributed, args=(world_size, fn) + args, nprocs=world_size, join=True)
-        
-        if mp.get_start_method(allow_none=True) is None:
-            mp.set_start_method('spawn')
-        mp.Process(target=run).start()
-    
-    return wrapper
+                mp.spawn(self.run_distributed, args=(world_size,) + args, nprocs=world_size, join=True)
+        else:
+            world_size = torch.cuda.device_count()
+            mp.spawn(self.run_distributed, args=(world_size,) + args, nprocs=world_size, join=True)
+
+def distribute(num_virtual_gpus=None):
+    def decorator(fn):
+        @wraps(fn)
+        def wrapper(*args, **kwargs):
+            runner = DistributedRunner(fn, num_virtual_gpus)
+            runner(*args, **kwargs)
+        return wrapper
+    return decorator
 
 # Example usage
-@distribute
+@distribute(num_virtual_gpus=4)
 def train(rank, world_size, num_epochs):
     model = SimpleModel().to(rank)
     ddp_model = DDP(model, device_ids=[rank])
@@ -71,4 +74,5 @@ def train(rank, world_size, num_epochs):
         # Add your actual training code here
 
 if __name__ == "__main__":
-    train(num_epochs=5, num_virtual_gpus=4)
+    mp.set_start_method('spawn')
+    train(num_epochs=5)
