@@ -4,6 +4,7 @@ import torch.nn as nn
 import torch.distributed as dist
 import torch.multiprocessing as mp
 from torch.nn.parallel import DistributedDataParallel as DDP
+from functools import wraps
 
 class VirtualGPU:
     def __init__(self, num_virtual_gpus):
@@ -39,16 +40,22 @@ def run_distributed(rank, world_size, fn, *args):
     cleanup()
 
 def distribute(fn):
+    @wraps(fn)
     def wrapper(*args, **kwargs):
         num_virtual_gpus = kwargs.pop('num_virtual_gpus', None)
         
-        if num_virtual_gpus is not None:
-            with VirtualGPU(num_virtual_gpus):
+        def run():
+            if num_virtual_gpus is not None:
+                with VirtualGPU(num_virtual_gpus):
+                    world_size = torch.cuda.device_count()
+                    mp.spawn(run_distributed, args=(world_size, fn) + args, nprocs=world_size, join=True)
+            else:
                 world_size = torch.cuda.device_count()
-                mp.spawn(run_distributed, args=(world_size, fn, *args), nprocs=world_size, join=True)
-        else:
-            world_size = torch.cuda.device_count()
-            mp.spawn(run_distributed, args=(world_size, fn, *args), nprocs=world_size, join=True)
+                mp.spawn(run_distributed, args=(world_size, fn) + args, nprocs=world_size, join=True)
+        
+        if mp.get_start_method(allow_none=True) is None:
+            mp.set_start_method('spawn')
+        mp.Process(target=run).start()
     
     return wrapper
 
@@ -63,6 +70,5 @@ def train(rank, world_size, num_epochs):
         print(f"Epoch {epoch+1}/{num_epochs} on GPU {rank}")
         # Add your actual training code here
 
-# If you want to run this file directly
 if __name__ == "__main__":
     train(num_epochs=5, num_virtual_gpus=4)
